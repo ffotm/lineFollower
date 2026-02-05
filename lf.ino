@@ -1,74 +1,79 @@
 #include <QTRSensors.h>
 
+//MOTOR PINS
+// D0 D1 control m1 (Left)
+// D2 D3 control m2 (Right)
+#define D0 2  // Left motor forward 
+#define D1 3  // Left motor reverse 
+#define D2 5  // Right motor forward 
+#define D3 6  // Right motor reverse
 
-//init motor
-#define ENA 5 //pins for speed control
-#define IN1 2 //left
-#define IN2 3 //left
+#define MIN_SPEED 60       // Minimum speed to overcome motor dead zone
+#define LINE_THRESHOLD 800 //800 code for black
 
-#define ENB 6 // kima ENA
-#define IN3 4 //right
-#define IN4 7 //right
-#define MIN_SPEED 60
-#define LINE_THRESHOLD 800
+//QTR SETUP
+QTRSensors qtr;
 
-//qtr setup
-QTRSensors qtr; //bib
+const uint8_t SensorCount = 5;
+uint16_t sensorValues[SensorCount];
+uint8_t qtrPins[SensorCount] = {8, 9, 10, 11, 12};
 
-const uint8_t SensorCount = 5; //obj for array
-uint16_t sensorValues[SensorCount]; //[5]
-uint8_t qtrPins[SensorCount] = {8, 9, 10, 11, 12}; //chaque sensor has a pin (qtrpins assigns pins to qtr)
+//PID VARs
+float Kp = 0.25;  // Proportional: current error (sharp turn strength)
+                  // If robot is too slow to turn → increase Kp slightly
+float Ki = 0.0;   // Integral: accumulated small errors (drift correction)
+                  // If robot slowly drifts off line on straights → increase Ki slightly
+float Kd = 1.8;   // Derivative: predicts error change (prevents overshoot/wobble)
+                  // If it wobbles too much → increase Kd
 
-//pid vars
-float Kp = 0.25; //propo (current e) the further the car the stronger the propo (sharp turn)
-//If robot is too slow to turn → increase Kp slightly
-float Ki = 0.0; //integral / sum of smaller errors propo cant fix (low turn)
-//If robot slowly drifts off the line on straight paths, increase Ki slightly
-float Kd = 1.8; //derivee / predicts e (prevents overshoot)
-//If it wobbles too much → increase Kd
-
-int lastError = 0; //ll kd
-int integral = 0; //accumelated error
-int baseSpeed = 170; //for the motors before correction
-
+int lastError = 0;     // For derivative calculation
+int integral = 0;      // Accumulated error
+int baseSpeed = 170;   // Base motor speed before PID correction
 
 void setup() {
   Serial.begin(9600);
 
-  // QTR DIGITAL
-  qtr.setTypeRC(); //telling it it's using digitals
-  qtr.setSensorPins(qtrPins, SensorCount); //array, 5
-
+  //QTR DIGITAL INIT 
+  qtr.setTypeRC();//digital RC sensors
+  qtr.setSensorPins(qtrPins, SensorCount);
 
   pinMode(LED_BUILTIN, OUTPUT);
-  digitalWrite(LED_BUILTIN, HIGH); //turns built-in light when correcting
+  digitalWrite(LED_BUILTIN, HIGH);//on during calibration
 
-
-  // Calibrate
-  for (int i = 0; i < 400; i++) { //400cycles*5delay=2s (lowertime->highspeed->less accurracy) and vice versa
-    qtr.calibrate(); //built in to sense colors
+  //CALIBRATION (2sec)
+  // 400 cycles × 5ms delay = 2s
+  // Lower time → higher speed → less accuracy (and vice versa)
+  for (int i = 0; i < 400; i++) {
+    qtr.calibrate();
     delay(5);
   }
 
-  digitalWrite(LED_BUILTIN, LOW);
+  digitalWrite(LED_BUILTIN, LOW);//off after calibration
 
-  // Motor pins setup connection
-  pinMode(ENA, OUTPUT);
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
+  //MOTOR PINS SETUP
+  pinMode(D0, OUTPUT);
+  pinMode(D1, OUTPUT);
+  pinMode(D2, OUTPUT);
+  pinMode(D3, OUTPUT);
 
-  pinMode(ENB, OUTPUT);
-  pinMode(IN3, OUTPUT);
-  pinMode(IN4, OUTPUT);
+  // Initialize motors stopped
+  analogWrite(D0, 0);
+  digitalWrite(D1, LOW);
+  analogWrite(D2, 0);
+ digitalWrite(D3, LOW);
 
   Serial.println("Calibration done");
 }
 
-// --------------------------------------------------
 void loop() {
-  uint16_t position = qtr.readLineBlack(sensorValues); // 0 → 4000
-  int error = 2000 - position; //2000 c centre t3 line/ pos c sensor val
+  //line position
+  //0 (far left), 4000 (far right)
+  uint16_t position = qtr.readLineBlack(sensorValues);
+  
+  // Error: negative = left of center, positive = right of center
+  int error = 2000 - position;
 
+  //COUNT ACTIVE SENSORS
   int activeSensors = 0;
   for (int i = 0; i < SensorCount; i++) {
     if (sensorValues[i] > LINE_THRESHOLD) {
@@ -76,69 +81,52 @@ void loop() {
     }
   }
 
-
-  // ----- SET BASE SPEED BASED ON LINE WIDTH -----
   if (activeSensors >= 4) {
-    baseSpeed = 120;   // wide line / intersection
+    baseSpeed = 120;   // intersection(multiple sensors) -> slow down
   } else {
-    baseSpeed = 170;   // normal tracking
+    baseSpeed = 170;  
   }
 
-  // PID
-  integral += error; //cumulated error
-  integral = constrain(integral, -1000, 1000); //limit
+  //PID CALCULATION
+  // Integral: accumulate error over time
+  integral += error;
+  integral = constrain(integral, -1000, 1000);
 
-  int derivative = error - lastError; //error change 
+  // Derivative: rate of error change (smooths response)
+  int derivative = error - lastError;
   lastError = error;
 
-  int correction = (Kp * error) + (Ki * integral) + (Kd * derivative); //pid
+  // PID correction value
+  int correction = (Kp * error) + (Ki * integral) + (Kd * derivative);
 
-  int leftSpeed  = baseSpeed - correction; 
-  int rightSpeed = baseSpeed + correction; 
-  //m3ntha it turns left ida correction>0 else right
+  //motor speed
+  // If correction > 0 → turn right (left faster, right slower)
+  // If correction < 0 → turn left (right faster, left slower)
+  int leftSpeed  = baseSpeed - correction;
+  int rightSpeed = baseSpeed + correction;
 
-  leftSpeed  = constrain(leftSpeed, -255, 255);
-  rightSpeed = constrain(rightSpeed, -255, 255);
+  // Constrain to valid PWM range
+  leftSpeed  = constrain(leftSpeed, 0, 255);
+  rightSpeed = constrain(rightSpeed, 0, 255);
 
- // prevent motor dead zone 
-if (leftSpeed > 0 && leftSpeed < MIN_SPEED) leftSpeed = MIN_SPEED;
-if (leftSpeed < 0 && leftSpeed > -MIN_SPEED) leftSpeed = -MIN_SPEED;
+  //avoid dead zone
+  if (leftSpeed > 0 && leftSpeed < MIN_SPEED) leftSpeed = MIN_SPEED;
+  if (leftSpeed < 0 && leftSpeed > -MIN_SPEED) leftSpeed = -MIN_SPEED;
 
-if (rightSpeed > 0 && rightSpeed < MIN_SPEED) rightSpeed = MIN_SPEED;
-if (rightSpeed < 0 && rightSpeed > -MIN_SPEED) rightSpeed = -MIN_SPEED;
+  if (rightSpeed > 0 && rightSpeed < MIN_SPEED) rightSpeed = MIN_SPEED;
+  if (rightSpeed < 0 && rightSpeed > -MIN_SPEED) rightSpeed = -MIN_SPEED;
 
-  motorDrive(leftSpeed, rightSpeed); //calls function
+  //setup motor
+  motorDrive(leftSpeed, rightSpeed);
+
+
+void motorDrive(int left, int right) {
   
+  //LEFT MOTOR (D0 = PWM, D1 = always LOW)
+  analogWrite(D0, left);      // 0 = stopped, 255 = full speed
+  // D1 stays LOW (already set in setup)
 
-}
-void motorDrive(int left, int right) { 
-
-  // LEFT MOTOR direction
-  if (left >= 0) {
-    digitalWrite(IN1, HIGH); 
-    digitalWrite(IN2, LOW);
-    analogWrite(ENA, left);
-    //digitsl -> firection, nalog -> speed
-   // one wheel clockwise
-
-  } else {
-    digitalWrite(IN1, LOW);
-    digitalWrite(IN2, HIGH);
-    analogWrite(ENA, -left);
-     // one wheel counterclockwise
-  }
-
-  // RIGHT MOTOR 
-  if (right >= 0) {
-    digitalWrite(IN3, HIGH);
-    digitalWrite(IN4, LOW);
-    analogWrite(ENB, right);
-     // one wheel clockwise
-  } else {
-    digitalWrite(IN3, LOW);
-    digitalWrite(IN4, HIGH);
-    analogWrite(ENB, -right);
-     // one wheel counterclockwise
-
-  }
+  //RIGHT MOTOR (D2 = PWM, D3 = always LOW)
+  analogWrite(D2, right);     // 0 = stopped, 255 = full speed
+  // D3 stays LOW (already set in setup)
 }
