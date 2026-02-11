@@ -122,7 +122,7 @@ void loop() {
 
 void motorDrive(int left, int right) {
   
-  //LEFT MOTOR (D0 = PWM, D1 = always LOW)
+  //LEFT MOTOR (D0 PWM, D1 always LOW)
   analogWrite(D0, left);      // 0 = stopped, 255 = full speed
   // D1 stays LOW (already set in setup)
 
